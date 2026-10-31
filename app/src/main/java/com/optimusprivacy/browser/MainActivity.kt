@@ -2,6 +2,7 @@ package com.optimusprivacy.browser
 
 import android.app.Activity
 import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
@@ -10,7 +11,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
-import android.webkit.SafeBrowsingResponse
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private lateinit var addressBar: EditText
     private lateinit var statusText: TextView
     private lateinit var progressBar: ProgressBar
+    private val browserPrefs by lazy { getSharedPreferences("optimus_browser", MODE_PRIVATE) }
 
     private val blockedDomains = listOf(
         "doubleclick.net",
@@ -68,17 +69,26 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
 
-        val controls = LinearLayout(this).apply {
+        val primaryControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        controls.addView(makeButton("Go") { navigate(addressBar.text.toString()) })
-        controls.addView(makeButton("Back") {
+        primaryControls.addView(makeButton("Go") { navigate(addressBar.text.toString()) })
+        primaryControls.addView(makeButton("Back") {
             if (webView.canGoBack()) webView.goBack()
         })
-        controls.addView(makeButton("Reload") { webView.reload() })
-        controls.addView(makeButton("Clear data") { clearBrowsingData() })
-        root.addView(controls)
+        primaryControls.addView(makeButton("Reload") { webView.reload() })
+        root.addView(primaryControls)
+
+        val savedControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        savedControls.addView(makeButton("Bookmark") { saveCurrentBookmark() })
+        savedControls.addView(makeButton("Bookmarks") { showSavedPages("bookmarks") })
+        savedControls.addView(makeButton("History") { showSavedPages("history") })
+        savedControls.addView(makeButton("Clear data") { confirmClearBrowsingData() })
+        root.addView(savedControls)
 
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
@@ -137,6 +147,9 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 addressBar.setText(url.orEmpty())
+                if (!url.isNullOrBlank() && (url.startsWith("https://") || url.startsWith("http://"))) {
+                    addToHistory(url)
+                }
                 statusText.text = "Optimus Browser • Blocked requests: $blockedCount"
             }
 
@@ -161,7 +174,9 @@ class MainActivity : Activity() {
     private fun makeButton(label: String, action: () -> Unit): Button =
         Button(this).apply {
             text = label
-            textSize = 11f
+            textSize = 10f
+            minWidth = 0
+            setPadding(4, 0, 4, 0)
             setOnClickListener { action() }
         }
 
@@ -182,6 +197,67 @@ class MainActivity : Activity() {
         webView.loadUrl(target)
     }
 
+    private fun saveCurrentBookmark() {
+        val url = webView.url
+        if (url.isNullOrBlank() || (!url.startsWith("https://") && !url.startsWith("http://"))) {
+            Toast.makeText(this, "Open a website before bookmarking", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val bookmarks = readList("bookmarks").toMutableList()
+        bookmarks.remove(url)
+        bookmarks.add(0, url)
+        writeList("bookmarks", bookmarks.take(200))
+        Toast.makeText(this, "Bookmark saved", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun addToHistory(url: String) {
+        val history = readList("history").toMutableList()
+        if (history.firstOrNull() != url) {
+            history.remove(url)
+            history.add(0, url)
+            writeList("history", history.take(100))
+        }
+    }
+
+    private fun readList(key: String): List<String> =
+        browserPrefs.getString(key, "").orEmpty()
+            .split("\n")
+            .filter { it.isNotBlank() }
+
+    private fun writeList(key: String, items: List<String>) {
+        browserPrefs.edit().putString(key, items.joinToString("\n")).apply()
+    }
+
+    private fun showSavedPages(key: String) {
+        val urls = readList(key)
+        if (urls.isEmpty()) {
+            Toast.makeText(this, if (key == "history") "No browsing history yet" else "No bookmarks yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = urls.map { url ->
+            val host = android.net.Uri.parse(url).host.orEmpty()
+            if (host.isBlank()) url else "$host\n$url"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(if (key == "history") "Browsing history" else "Bookmarks")
+            .setItems(labels) { _, which -> webView.loadUrl(urls[which]) }
+            .setNeutralButton("Clear list") { _, _ ->
+                writeList(key, emptyList())
+                Toast.makeText(this, if (key == "history") "History cleared" else "Bookmarks cleared", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun confirmClearBrowsingData() {
+        AlertDialog.Builder(this)
+            .setTitle("Clear browsing data?")
+            .setMessage("This clears cookies, cache, form data, and history on this device. Saved bookmarks will remain.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Clear") { _, _ -> clearBrowsingData() }
+            .show()
+    }
+
     private fun clearBrowsingData() {
         webView.stopLoading()
         webView.clearHistory()
@@ -191,6 +267,7 @@ class MainActivity : Activity() {
             CookieManager.getInstance().flush()
         }
         WebStorage.getInstance().deleteAllData()
+        browserPrefs.edit().remove("history").apply()
         blockedCount = 0
         addressBar.setText("")
         statusText.text = "Browsing data cleared on this device"
